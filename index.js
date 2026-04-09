@@ -7,16 +7,19 @@ ws.onmessage = async (event) => {
   console.log("Received prompt from server:", prompt);
   const aiResponseChunks = await askAI(prompt, 1, 3);
 
-  let output = '';
-
-    for await (const chunk of aiResponseChunks) {
-        if (aiContext.abortController.signal.aborted) {
-            break;
-        }
-        console.log('Received chunk:', chunk);
-        output += chunk;
+  for await (const chunk of aiResponseChunks) {
+    if (aiContext.abortController.signal.aborted) break;
+    console.log("Sending chunk to server:", chunk);
+    ws.send(JSON.stringify({
+        type: "chunk",
+        content: chunk
+    }));
     }
-  ws.send(output);
+
+    // sinal de fim
+    ws.send(JSON.stringify({
+        type: "done"
+    }));
 };
 
 export const aiContext = {
