@@ -1,5 +1,6 @@
 import express from "express";
 import { WebSocketServer } from "ws";
+import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
@@ -13,17 +14,39 @@ wss.on("connection", (ws) => {
   browserSocket = ws;
 });
 
+function extractText(content) {
+  if (!content) return "";
+
+  // caso simples (string)
+  if (typeof content === "string") {
+    return content;
+  }
+
+  // caso Anthropic (array)
+  if (Array.isArray(content)) {
+    return content
+      .map((c) => {
+        if (c.type === "text") return c.text;
+        return "";
+      })
+      .join("");
+  }
+
+  return "";
+}
 // 🔹 Converte messages → prompt
 function buildPrompt(messages) {
   let prompt = "";
 
   for (const m of messages) {
+    const text = extractText(m.content);
+
     if (m.role === "system") {
-      prompt += `SYSTEM: ${m.content}\n`;
+      prompt += `SYSTEM: ${text}\n`;
     } else if (m.role === "user") {
-      prompt += `USER: ${m.content}\n`;
+      prompt += `USER: ${text}\n`;
     } else if (m.role === "assistant") {
-      prompt += `ASSISTANT: ${m.content}\n`;
+      prompt += `ASSISTANT: ${text}\n`;
     }
   }
 
@@ -33,11 +56,21 @@ function buildPrompt(messages) {
 function estimateTokens(text) {
   return Math.ceil(text.length / 4);
 }
+
 function askBrowserStream(prompt, onChunk, onDone) {
-  if (!browserSocket) throw new Error("Browser não conectado");
+  const id = crypto.randomUUID();
 
   const handler = (msg) => {
-    const data = JSON.parse(msg.toString());
+    let data;
+
+    try {
+      data = JSON.parse(msg.toString());
+    } catch {
+      return;
+    }
+
+    // 🔥 ignora mensagens de outras requests
+    if (data.id !== id) return;
 
     if (data.type === "chunk") {
       onChunk(data.content);
@@ -50,152 +83,280 @@ function askBrowserStream(prompt, onChunk, onDone) {
   };
 
   browserSocket.on("message", handler);
-  browserSocket.send(prompt);
+
+  browserSocket.send(JSON.stringify({
+    id,
+    prompt
+  }));
 }
-// 🔹 Comunicação com browser
-function askBrowser(prompt) {
+
+function askBrowserFull(prompt) {
+    const id = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     if (!browserSocket) {
       return reject("Browser não conectado");
     }
 
-    browserSocket.once("message", (msg) => {
-      resolve(msg.toString());
-    });
+    let fullText = "";
 
-    browserSocket.send(prompt);
+    const handler = (msg) => {
+      let data;
+
+      try {
+       
+        data = JSON.parse(msg.toString());
+      } catch {
+        return; // ignora lixo
+      }
+      if (data.id !== id) return;
+
+      if (data.type === "chunk") {
+        fullText += data.content;
+      }
+
+      if (data.type === "done") {
+        browserSocket.off("message", handler);
+        resolve(fullText);
+      }
+    };
+
+    browserSocket.on("message", handler);
+
+    browserSocket.send(JSON.stringify({
+        id,
+        prompt
+        }));
   });
 }
-
-app.post("/v1/chat/completions", async (req, res) => {
-  const { messages, stream } = req.body;
-
-  const prompt = buildPrompt(messages);
-
-  if (!stream) {
-    // fallback normal (se quiser manter)
-    const response = await askBrowser(prompt);
-
-    return res.json({
-      choices: [
-        {
-          message: { role: "assistant", content: response }
-        }
-      ]
-    });
-  }
-
-  // 🔥 STREAMING MODE
-
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-
-  let fullText = "";
-  const start = Date.now();
-
-  askBrowserStream(
-    prompt,
-    (chunk) => {
-      fullText += chunk;
-
-      const payload = {
-        id: "chatcmpl-local",
-        object: "chat.completion.chunk",
-        created: Math.floor(Date.now() / 1000),
-        model: "gemini-nano-local",
-        choices: [
-          {
-            delta: {
-              content: chunk
-            },
-            index: 0,
-            finish_reason: null
-          }
-        ]
-      };
-
-      res.write(`data: ${JSON.stringify(payload)}\n\n`);
-    },
-    () => {
-      const end = Date.now();
-      const durationSec = (end - start) / 1000;
-
-      const tokens = estimateTokens(fullText);
-      const tps = tokens / durationSec;
-
-      console.log(`⚡ ${tokens} tokens | ${tps.toFixed(2)} t/s`);
-
-      // final chunk
-      res.write(`data: ${JSON.stringify({
-        choices: [
-          {
-            delta: {},
-            finish_reason: "stop",
-            index: 0
-          }
-        ]
-      })}\n\n`);
-
-      res.write(`data: [DONE]\n\n`);
-      res.end();
-    }
-  );
-});
-
-
-
-/*
-// 🔥 Endpoint padrão OpenAI
-app.post("/v1/chat/completions", async (req, res) => {
+app.post("/v1/messages", async (req, res) => {
   try {
     const { messages, stream } = req.body;
-
-    // (opcional) ignorar streaming por enquanto
-    if (stream) {
-      console.warn("Streaming não suportado ainda");
-    }
 
     const prompt = buildPrompt(messages);
 
     console.log("\n--- PROMPT ---\n", prompt);
 
+    // =========================
+    // 🧩 NÃO STREAMING
+    // =========================
+    if (!stream) {
+      const start = Date.now();
+
+      const response = await askBrowserFull(prompt);
+
+      const end = Date.now();
+      const durationSec = (end - start) / 1000;
+
+      const inputTokens = estimateTokens(prompt);
+      const outputTokens = estimateTokens(response);
+      const tps = outputTokens / durationSec;
+
+      console.log(`⚡ ${outputTokens} tokens | ${tps.toFixed(2)} t/s`);
+
+      return res.json({
+        id: "msg-local",
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: response
+          }
+        ],
+        usage: {
+          input_tokens: inputTokens,
+          output_tokens: outputTokens
+        }
+      });
+    }
+
+    // =========================
+    // 🔥 STREAMING MODE (SSE)
+    // =========================
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+
+    let fullText = "";
     const start = Date.now();
 
-    const response = await askBrowser(prompt);
+    // 🔥 1. INÍCIO DA MENSAGEM (ESSENCIAL)
+    res.write(`event: message_start\n`);
+    res.write(`data: ${JSON.stringify({
+      id: "msg-local",
+      type: "message",
+      role: "assistant",
+      content: []
+    })}\n\n`);
 
-    const end = Date.now();
-    const durationSec = (end - start) / 1000;
-    
-    const completionTokens = estimateTokens(response);
-    const tokensPerSecond = completionTokens / durationSec;
+    // 🔥 2. INÍCIO DO BLOCO DE CONTEÚDO
+    res.write(`event: content_block_start\n`);
+    res.write(`data: ${JSON.stringify({
+      index: 0,
+      type: "text"
+    })}\n\n`);
 
-    const debugInfo = `
-    ---
-    ⚡ Tokens: ${completionTokens}
-    ⏱️ Tempo: ${durationSec.toFixed(2)}s
-    🚀 Velocidade: ${tokensPerSecond.toFixed(2)} tokens/s
-    `;
+    askBrowserStream(
+      prompt,
 
-    console.log("\n--- RESPONSE ---\n", response);
-    console.log(debugInfo);
+      // 🔹 cada chunk
+      (chunk) => {
+        fullText += chunk;
 
-    res.json({
-      id: "chatcmpl-local",
-      object: "chat.completion",
-      created: Math.floor(Date.now() / 1000),
-      model: "gemini-nano-local",
-      choices: [
-        {
+        res.write(`event: content_block_delta\n`);
+        res.write(`data: ${JSON.stringify({
           index: 0,
-          message: {
-            role: "assistant",
-            content: response + debugInfo
-          },
-          finish_reason: "stop"
-        }
-      ]
+          delta: {
+            type: "text_delta",
+            text: chunk
+          }
+        })}\n\n`);
+      },
+
+      // 🔹 fim
+      () => {
+        const end = Date.now();
+        const durationSec = (end - start) / 1000;
+
+        const inputTokens = estimateTokens(prompt);
+        const outputTokens = estimateTokens(fullText);
+        const tps = outputTokens / durationSec;
+
+        console.log(`⚡ ${outputTokens} tokens | ${tps.toFixed(2)} t/s`);
+
+        // 🔥 3. FIM DO BLOCO
+        res.write(`event: content_block_stop\n`);
+        res.write(`data: ${JSON.stringify({
+          index: 0
+        })}\n\n`);
+
+        // 🔥 4. FIM DA MENSAGEM (ESSENCIAL)
+        res.write(`event: message_stop\n`);
+        res.write(`data: ${JSON.stringify({
+          stop_reason: "end_turn",
+          usage: {
+            input_tokens: inputTokens,
+            output_tokens: outputTokens
+          }
+        })}\n\n`);
+
+        res.end();
+      }
+    );
+
+  } catch (err) {
+    console.error(err);
+
+    res.status(500).json({
+      error: {
+        message: err.toString(),
+        type: "internal_error"
+      }
     });
+  }
+});
+/*
+app.post("/v1/messages", async (req, res) => {
+  try {
+    const { messages, stream } = req.body;
+
+    const prompt = buildPrompt(messages);
+
+    console.log("\n--- PROMPT ---\n", prompt);
+
+    // =========================
+    // 🧩 NÃO STREAMING
+    // =========================
+    if (!stream) {
+        const start = Date.now();
+
+        const response = await askBrowserFull(prompt);
+
+        const end = Date.now();
+        const durationSec = (end - start) / 1000;
+
+        const tokens = estimateTokens(response);
+        const tps = tokens / durationSec;
+        const inputTokens = estimateTokens(prompt);
+        const outputTokens = estimateTokens(response);
+
+        console.log(`⚡ ${tokens} tokens | ${tps.toFixed(2)} t/s`);
+
+        return res.json({   // 🔥 AQUI
+            id: "msg-local",
+            type: "message",
+            role: "assistant",
+            content: [
+            {
+                type: "text",
+                text: response
+            }
+            ],
+            usage: {
+            input_tokens: inputTokens,
+            output_tokens: outputTokens
+            }
+        });
+        }
+
+    // =========================
+    // 🔥 STREAMING MODE (SSE)
+    // =========================
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+
+    let fullText = "";
+    const start = Date.now();
+
+    askBrowserStream(
+      prompt,
+
+      // 🔹 cada chunk
+      (chunk) => {
+        fullText += chunk;
+
+        const event = {
+          type: "content_block_delta",
+          index: 0,
+          delta: {
+            type: "text_delta",
+            text: chunk
+          }
+        };
+
+        res.write(`event: content_block_delta\n`);
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      },
+
+      // 🔹 fim
+      () => {
+        const end = Date.now();
+        const durationSec = (end - start) / 1000;
+
+        const tokens = estimateTokens(fullText);
+        const tps = tokens / durationSec;
+
+        console.log(`⚡ ${tokens} tokens | ${tps.toFixed(2)} t/s`);
+
+        // evento de fim do bloco
+        res.write(`event: content_block_stop\n`);
+        res.write(`data: {}\n\n`);
+
+        // mensagem final        
+        res.write(`event: message_stop\n`);
+        res.write(`data: ${JSON.stringify({
+        stop_reason: "end_turn",
+        usage: {
+            input_tokens: estimateTokens(prompt),
+            output_tokens: estimateTokens(fullText)
+        }
+        })}\n\n`);
+        res.end();
+      }
+    );
 
   } catch (err) {
     console.error(err);
@@ -209,6 +370,11 @@ app.post("/v1/chat/completions", async (req, res) => {
   }
 });
 */
+app.use((req, res, next) => {
+  console.log("➡️", req.method, req.url);
+  next();
+});
+
 // 🔹 Endpoint de modelos (opcional mas recomendado)
 app.get("/v1/models", (req, res) => {
   res.json({
@@ -226,38 +392,3 @@ app.get("/v1/models", (req, res) => {
 app.listen(3000, () => {
   console.log("🚀 API OpenAI-like rodando em http://localhost:3000");
 });
-/*
-import express from "express";
-import { WebSocketServer } from "ws";
-
-const app = express();
-app.use(express.json());
-
-let browserSocket;
-
-const wss = new WebSocketServer({ port: 3001 });
-
-wss.on("connection", (ws) => {
-  console.log("Browser conectado");
-  browserSocket = ws;
-});
-
-function askBrowser(prompt) {
-  return new Promise((resolve) => {
-    browserSocket.once("message", (msg) => {
-      resolve(msg.toString());
-    });
-
-    browserSocket.send(prompt);
-  });
-}
-
-app.post("/chat", async (req, res) => {
-    console.log(req.body);
-  const response = await askBrowser(req.body.prompt);
-  res.json({ response });
-});
-
-app.listen(3000, async  ()=>{
-    console.log("Servidor rodando na porta 3000");
-})*/
