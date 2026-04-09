@@ -2,25 +2,46 @@ const ws = new WebSocket("ws://localhost:3001");
 
 let session;
 
-ws.onmessage = async (event) => {
-  const prompt = event.data;
-  console.log("Received prompt from server:", prompt);
-  const aiResponseChunks = await askAI(prompt, 1, 3);
+let currentAbortController = null;
 
-  for await (const chunk of aiResponseChunks) {
-    if (aiContext.abortController.signal.aborted) break;
-    console.log("Sending chunk to server:", chunk);
-    ws.send(JSON.stringify({
+ws.onmessage = async (event) => {
+  const { id, prompt } = JSON.parse(event.data);
+
+  console.log("Received prompt from server:", prompt);
+
+  // 🔥 cancela execução anterior
+  if (currentAbortController) {
+    currentAbortController.abort();
+  }
+
+  currentAbortController = new AbortController();
+
+  try {
+    
+
+    const aiResponseChunks = askAI(prompt, 1, 3);
+
+    for await (const chunk of aiResponseChunks) {
+        console.log("Sending chunk to server:", chunk, "for prompt id:", id);
+        ws.send(JSON.stringify({
+        id,
         type: "chunk",
         content: chunk
-    }));
+        }));
     }
 
-    // sinal de fim
     ws.send(JSON.stringify({
+        id,
         type: "done"
     }));
+    
+  } catch (err) {
+    if (err.name !== "AbortError") {
+      console.error(err);
+    }
+  }
 };
+
 
 export const aiContext = {
     session: null,
