@@ -5,9 +5,10 @@ let session;
 let currentAbortController = null;
 
 ws.onmessage = async (event) => {
-  const { id, prompt } = JSON.parse(event.data);
+  const { id, prompt, tools } = JSON.parse(event.data);
 
   console.log("Received prompt from server:", prompt);
+  console.log("Available tools:", tools?.length || 0);
 
   // 🔥 cancela execução anterior
   if (currentAbortController) {
@@ -17,24 +18,25 @@ ws.onmessage = async (event) => {
   currentAbortController = new AbortController();
 
   try {
-    
-
-    const aiResponseChunks = askAI(prompt, 1, 3);
+    const aiResponseChunks = askAI(prompt, 1, 3, tools);
 
     for await (const chunk of aiResponseChunks) {
-        console.log("Sending chunk to server:", chunk, "for prompt id:", id);
-        ws.send(JSON.stringify({
-        id,
-        type: "chunk",
-        content: chunk
-        }));
+      console.log("Sending chunk to server:", chunk, "for prompt id:", id);
+      ws.send(
+        JSON.stringify({
+          id,
+          type: "chunk",
+          content: chunk,
+        }),
+      );
     }
 
-    ws.send(JSON.stringify({
+    ws.send(
+      JSON.stringify({
         id,
-        type: "done"
-    }));
-    
+        type: "done",
+      }),
+    );
   } catch (err) {
     if (err.name !== "AbortError") {
       console.error(err);
@@ -42,233 +44,253 @@ ws.onmessage = async (event) => {
   }
 };
 
-
 export const aiContext = {
-    session: null,
-    abortController: null,
-    isGenerating: false,
+  session: null,
+  abortController: null,
+  isGenerating: false,
 };
 
 const elements = {
-    temperature: document.getElementById('temperature'),
-    temperatureValue: document.getElementById('temp-value'),
-    topKValue: document.getElementById('topk-value'),
-    topK: document.getElementById('topK'),
-    form: document.getElementById('question-form'),
-    questionInput: document.getElementById('question'),
-    output: document.getElementById('output'),
-    button: document.getElementById('ask-button'),
-    year: document.getElementById('year'),
-}
+  temperature: document.getElementById("temperature"),
+  temperatureValue: document.getElementById("temp-value"),
+  topKValue: document.getElementById("topk-value"),
+  topK: document.getElementById("topK"),
+  form: document.getElementById("question-form"),
+  questionInput: document.getElementById("question"),
+  output: document.getElementById("output"),
+  button: document.getElementById("ask-button"),
+  year: document.getElementById("year"),
+};
 
 async function setupEventListeners() {
+  // Update display values for range inputs
+  elements.temperature.addEventListener("input", (e) => {
+    elements.temperatureValue.textContent = e.target.value;
+  });
 
-    // Update display values for range inputs
-    elements.temperature.addEventListener('input', (e) => {
-        elements.temperatureValue.textContent = e.target.value;
-    });
+  elements.topK.addEventListener("input", (e) => {
+    elements.topKValue.textContent = e.target.value;
+  });
 
-    elements.topK.addEventListener('input', (e) => {
-        elements.topKValue.textContent = e.target.value;
-    });
+  elements.form.addEventListener("submit", async function (event) {
+    event.preventDefault();
 
-    elements.form.addEventListener('submit', async function (event) {
-        event.preventDefault();
+    if (aiContext.isGenerating) {
+      toggleSendOrStopButton(false);
+      return;
+    }
 
-        if (aiContext.isGenerating) {
-            toggleSendOrStopButton(false)
-            return;
-        }
-
-        onSubmitQuestion();
-    });
+    onSubmitQuestion();
+  });
 }
 
 async function onSubmitQuestion() {
-    const questionInput = elements.questionInput;
-    const output = elements.output;
-    const question = questionInput.value;
+  const questionInput = elements.questionInput;
+  const output = elements.output;
+  const question = questionInput.value;
 
-    if (!question.trim()) {
-        return;
+  if (!question.trim()) {
+    return;
+  }
+
+  // Get parameters from form
+  const temperature = parseFloat(elements.temperature.value);
+  const topK = parseInt(elements.topK.value);
+  console.log("Using parameters:", { temperature, topK });
+
+  // Change button to stop mode
+  toggleSendOrStopButton(true);
+
+  output.textContent = "Processing your question...";
+  const aiResponseChunks = await askAI(question, temperature, topK);
+  output.textContent = "";
+
+  for await (const chunk of aiResponseChunks) {
+    if (aiContext.abortController.signal.aborted) {
+      break;
     }
+    console.log("Received chunk:", chunk);
+    output.textContent += chunk;
+  }
 
-    // Get parameters from form
-    const temperature = parseFloat(elements.temperature.value);
-    const topK = parseInt(elements.topK.value);
-    console.log('Using parameters:', { temperature, topK });
-
-    // Change button to stop mode
-    toggleSendOrStopButton(true)
-
-    output.textContent = 'Processing your question...';
-    const aiResponseChunks = await askAI(question, temperature, topK);
-    output.textContent = '';
-
-    for await (const chunk of aiResponseChunks) {
-        if (aiContext.abortController.signal.aborted) {
-            break;
-        }
-        console.log('Received chunk:', chunk);
-        output.textContent += chunk;
-    }
-
-   toggleSendOrStopButton(false);
+  toggleSendOrStopButton(false);
 }
 
 function toggleSendOrStopButton(isGenerating) {
-    if (isGenerating) {
-        // Switch to stop mode
-        aiContext.isGenerating = isGenerating;
-        localStorage.setItem('aiContext', JSON.stringify(aiContext));
-        elements.button.textContent = 'Parar';
-        elements.button.classList.add('stop-button');
-    } else {
-        // Switch to send mode
-        aiContext.abortController?.abort();
-        aiContext.isGenerating = isGenerating;
-        localStorage.setItem('aiContext', JSON.stringify(aiContext));
-        elements.button.textContent = 'Enviar';
-        elements.button.classList.remove('stop-button');
-    }
+  if (isGenerating) {
+    // Switch to stop mode
+    aiContext.isGenerating = isGenerating;
+    localStorage.setItem("aiContext", JSON.stringify(aiContext));
+    elements.button.textContent = "Parar";
+    elements.button.classList.add("stop-button");
+  } else {
+    // Switch to send mode
+    aiContext.abortController?.abort();
+    aiContext.isGenerating = isGenerating;
+    localStorage.setItem("aiContext", JSON.stringify(aiContext));
+    elements.button.textContent = "Enviar";
+    elements.button.classList.remove("stop-button");
+  }
 }
 // Export askAI for use in Node.js/server
-async function* askAI(question, temperature, topK) {
-    aiContext.abortController?.abort();
-    aiContext.abortController = new AbortController();
-    localStorage.setItem('aiContext', JSON.stringify(aiContext));
-    // Destroy previous session and create new one with updated parameters
-    if (aiContext.session) {
-        aiContext.session.destroy();
-        localStorage.setItem('aiContext', JSON.stringify(aiContext));
-    }
+async function* askAI(question, temperature, topK, tools = []) {
+  aiContext.abortController?.abort();
+  aiContext.abortController = new AbortController();
+  localStorage.setItem("aiContext", JSON.stringify(aiContext));
+  // Destroy previous session and create new one with updated parameters
+  if (aiContext.session) {
+    aiContext.session.destroy();
+    localStorage.setItem("aiContext", JSON.stringify(aiContext));
+  }
 
-    const session = await LanguageModel.create({
-        expectedInputLanguages: ["pt"],
-        temperature: temperature,
-        topK: topK,
-        initialPrompts: [
-            {
-                role: 'system', content: `
-                Você é um assistente de IA que responde de forma clara e objetiva.
-                Responda sempre em formato de texto ao invés de markdown`
-
-            },
-        ],
+  // 🛠️ Build tools context for system prompt
+  let toolsContext = "";
+  if (tools && tools.length > 0) {
+    toolsContext = "\n\n[AVAILABLE TOOLS]\n";
+    tools.forEach((tool) => {
+      toolsContext += `Tool: ${tool.name}\n`;
+      toolsContext += `Description: ${tool.description}\n`;
+      toolsContext += `Input Schema: ${JSON.stringify(tool.input_schema)}\n\n`;
     });
+    toolsContext +=
+      "When you need to use a tool, respond with JSON in this format:\n";
+    toolsContext +=
+      '{"type": "tool_use", "tool": "tool_name", "input": {...}}\n';
+    toolsContext += "You can call multiple tools in sequence.\n";
+  }
 
-    const responseStream = await session.promptStreaming(
-        [
-            {
-                role: 'user',
-                content: question,
-            },
-        ],
-        {
-            signal: aiContext.abortController.signal,            
-        }
-        
-    );
-    localStorage.setItem('aiContext', JSON.stringify(aiContext));
+  const session = await LanguageModel.create({
+    expectedInputLanguages: ["pt"],
+    temperature: temperature,
+    topK: topK,
+    initialPrompts: [
+      {
+        role: "system",
+        content: `Você é um assistente de desenvolvimento de software, sendo chamado através do Claude Code CLI, podendo chamar metodos do windows e editar arquivo com permissão do console CLI.${toolsContext}`,
+      },
+    ],
+  });
 
-    for await (const chunk of responseStream) {
-        if (aiContext.abortController.signal.aborted) {
-            localStorage.setItem('aiContext', JSON.stringify(aiContext));
-            break;
-        }
-        yield chunk;
+  const responseStream = await session.promptStreaming(
+    [
+      {
+        role: "user",
+        content: question,
+      },
+    ],
+    {
+      signal: aiContext.abortController.signal,
+    },
+  );
+  localStorage.setItem("aiContext", JSON.stringify(aiContext));
+
+  for await (const chunk of responseStream) {
+    if (aiContext.abortController.signal.aborted) {
+      localStorage.setItem("aiContext", JSON.stringify(aiContext));
+      break;
     }
+    yield chunk;
+  }
 }
 
-
 async function checkRequirements() {
-    const errors = [];
-    const returnResults = () => errors.length ? errors : null;
+  const errors = [];
+  const returnResults = () => (errors.length ? errors : null);
 
-    // @ts-ignore
-    const isChrome = !!window.chrome;
-    if (!isChrome)
-        errors.push("⚠️ Este recurso só funciona no Google Chrome ou Chrome Canary (versão recente).");
-    if (!('LanguageModel' in self)) {
-        errors.push("⚠️ As APIs nativas de IA não estão ativas.");
-        errors.push("Ative a seguinte flag em chrome://flags/:");
-        errors.push("- Prompt API for Gemini Nano (chrome://flags/#prompt-api-for-gemini-nano)");
-        errors.push("Depois reinicie o Chrome e tente novamente.");
-        return returnResults();
-    }
-
-    const availability = await LanguageModel.availability({ languages: ["pt"] });
-    console.log('Language Model Availability:', availability);
-    if (availability === 'available') {
-        return returnResults();
-    }
-
-    if (availability === 'unavailable') {
-        errors.push(`⚠️ O seu dispositivo não suporta modelos de linguagem nativos de IA.`);
-    }
-
-    if (availability === 'downloading') {
-        errors.push(`⚠️ O modelo de linguagem de IA está sendo baixado. Por favor, aguarde alguns minutos e tente novamente.`);
-    }
-
-    if (availability === 'downloadable') {
-        errors.push(`⚠️ O modelo de linguagem de IA precisa ser baixado, baixando agora... (acompanhe o progresso no terminal do chrome)`);
-        try {
-            const session = await LanguageModel.create({
-                expectedInputLanguages: ["pt"],
-                monitor(m) {
-                    m.addEventListener('downloadprogress', (e) => {
-                        const percent = ((e.loaded / e.total) * 100).toFixed(0);
-                        console.log(`Downloaded ${percent}%`);
-                    });
-                }
-            });
-            await session.prompt('Olá');
-            session.destroy();
-
-            // Re-check availability after download
-            const newAvailability = await LanguageModel.availability({ languages: ["pt"] });
-            if (newAvailability === 'available') {
-                return null; // Download successful
-            }
-        } catch (error) {
-            console.error('Error downloading model:', error);
-            errors.push(`⚠️ Erro ao baixar o modelo: ${error.message}`);
-        }
-    }
-
+  // @ts-ignore
+  const isChrome = !!window.chrome;
+  if (!isChrome)
+    errors.push(
+      "⚠️ Este recurso só funciona no Google Chrome ou Chrome Canary (versão recente).",
+    );
+  if (!("LanguageModel" in self)) {
+    errors.push("⚠️ As APIs nativas de IA não estão ativas.");
+    errors.push("Ative a seguinte flag em chrome://flags/:");
+    errors.push(
+      "- Prompt API for Gemini Nano (chrome://flags/#prompt-api-for-gemini-nano)",
+    );
+    errors.push("Depois reinicie o Chrome e tente novamente.");
     return returnResults();
+  }
 
+  const availability = await LanguageModel.availability({ languages: ["pt"] });
+  console.log("Language Model Availability:", availability);
+  if (availability === "available") {
+    return returnResults();
+  }
+
+  if (availability === "unavailable") {
+    errors.push(
+      `⚠️ O seu dispositivo não suporta modelos de linguagem nativos de IA.`,
+    );
+  }
+
+  if (availability === "downloading") {
+    errors.push(
+      `⚠️ O modelo de linguagem de IA está sendo baixado. Por favor, aguarde alguns minutos e tente novamente.`,
+    );
+  }
+
+  if (availability === "downloadable") {
+    errors.push(
+      `⚠️ O modelo de linguagem de IA precisa ser baixado, baixando agora... (acompanhe o progresso no terminal do chrome)`,
+    );
+    try {
+      const session = await LanguageModel.create({
+        expectedInputLanguages: ["pt"],
+        monitor(m) {
+          m.addEventListener("downloadprogress", (e) => {
+            const percent = ((e.loaded / e.total) * 100).toFixed(0);
+            console.log(`Downloaded ${percent}%`);
+          });
+        },
+      });
+      await session.prompt("Olá");
+      session.destroy();
+
+      // Re-check availability after download
+      const newAvailability = await LanguageModel.availability({
+        languages: ["pt"],
+      });
+      if (newAvailability === "available") {
+        return null; // Download successful
+      }
+    } catch (error) {
+      console.error("Error downloading model:", error);
+      errors.push(`⚠️ Erro ao baixar o modelo: ${error.message}`);
+    }
+  }
+
+  return returnResults();
 }
 
 (async function main() {
-    elements.year.textContent = new Date().getFullYear();
+  elements.year.textContent = new Date().getFullYear();
 
-    const reqErrors = await checkRequirements();
-    if (reqErrors) {
-        elements.output.innerHTML = reqErrors.join('<br/>');
-        elements.button.disabled = true;
-        return;
-    }
+  const reqErrors = await checkRequirements();
+  if (reqErrors) {
+    elements.output.innerHTML = reqErrors.join("<br/>");
+    elements.button.disabled = true;
+    return;
+  }
 
-    const params = await LanguageModel.params();
-    console.log('Language Model Params:', params);
-    /*
-    defaultTemperature: 1
-    defaultTopK:3
-    maxTemperature:2
-    maxTopK:128
-    */
+  //const params = await LanguageModel.params();
+  const params = {
+    defaultTemperature: 1,
+    defaultTopK: 3,
+    maxTemperature: 2,
+    maxTopK: 128,
+  };
+  console.log("Language Model Params:", params);
 
-    elements.topK.max = params.maxTopK;
-    elements.topK.min = 1;
-    elements.topK.value = params.defaultTopK;
-    elements.topKValue.textContent = params.defaultTopK;
+  elements.topK.max = params.maxTopK;
+  elements.topK.min = 1;
+  elements.topK.value = params.defaultTopK;
+  elements.topKValue.textContent = params.defaultTopK;
 
-    elements.temperatureValue.textContent = params.defaultTemperature;
-    elements.temperature.max = params.maxTemperature;
-    elements.temperature.min = 0;
-    elements.temperature.value = params.defaultTemperature;
-    return setupEventListeners()
+  elements.temperatureValue.textContent = params.defaultTemperature;
+  elements.temperature.max = params.maxTemperature;
+  elements.temperature.min = 0;
+  elements.temperature.value = params.defaultTemperature;
+  return setupEventListeners();
 })();
-
